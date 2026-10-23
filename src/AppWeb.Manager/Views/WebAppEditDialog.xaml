@@ -1,0 +1,105 @@
+<ContentDialog
+    x:Class="AppWeb.Manager.Views.WebAppEditDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    CloseButtonText="Cancelar"
+    DefaultButton="Primary"
+    PrimaryButtonClick="OnPrimaryButtonClick"
+    PrimaryButtonText="Salvar">
+
+    <ScrollViewer MaxHeight="540">
+        <StackPanel MinWidth="420" Spacing="12">
+            <TextBox
+                x:Name="NameBox"
+                Header="Nome"
+                PlaceholderText="Ex.: Notion" />
+
+            <TextBox
+                x:Name="UrlBox"
+                Header="Endereço"
+                PlaceholderText="https://www.exemplo.com" />
+
+            <TextBox
+                x:Name="DescriptionBox"
+                Height="72"
+                AcceptsReturn="True"
+                Header="Descrição (opcional)"
+                PlaceholderText="Uma descrição curta para identificar o app"
+                TextWrapping="Wrap" />
+
+            <StackPanel Spacing="8">
+                <TextBlock Text="Ícone" />
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <Border
+                        Width="56"
+                        Height="56"
+                        Background="{ThemeResource ControlFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="10">
+                        <Grid>
+                            <FontIcon
+                                x:Name="IconPlaceholder"
+                                FontSize="22"
+                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                Glyph="&#xE774;" />
+                            <Image
+                                x:Name="IconPreview"
+                                Stretch="UniformToFill"
+                                Visibility="Collapsed" />
+                        </Grid>
+                    </Border>
+
+                    <StackPanel
+                        Grid.Column="1"
+                        VerticalAlignment="Center"
+                        Spacing="6">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button
+                                Click="ChooseIconButton_Click"
+                                Content="Escolher imagem..." />
+                            <Button
+                                Click="UseFaviconButton_Click"
+                                Content="Usar favicon do site" />
+                        </StackPanel>
+                        <TextBlock
+                            x:Name="IconPathText"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Style="{StaticResource CaptionTextBlockStyle}"
+                            Text="O favicon do site será usado automaticamente."
+                            TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                </Grid>
+            </StackPanel>
+
+            <ComboBox
+                x:Name="BrowserBox"
+                Header="Navegador"
+                DisplayMemberPath="DisplayName"
+                HorizontalAlignment="Stretch" />
+
+            <ToggleSwitch
+                x:Name="ToolbarSwitch"
+                Header="Mostrar barra de ferramentas"
+                OffContent="Não"
+                OnContent="Sim" />
+
+            <ToggleSwitch
+                x:Name="PrivateSwitch"
+                Header="Abrir em janela privada"
+                OffContent="Não"
+                OnContent="Sim" />
+
+            <TextBlock
+                x:Name="ErrorText"
+                Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                TextWrapping="Wrap"
+                Visibility="Collapsed" />
+        </StackPanel>
+    </ScrollViewer>
+</ContentDialog>
