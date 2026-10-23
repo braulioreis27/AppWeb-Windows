@@ -1,0 +1,282 @@
+name: build-release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versão SemVer estável, sem prefixo v (ex.: 1.2.3)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DOTNET_VERSION: '10.0.x'
+  CONFIGURATION: Release
+  RUNTIME_ID: win-x64
+  SOLUTION: AppWeb.sln
+  PROJECT: src/AppWeb.Manager/AppWeb.Manager.csproj
+  TEST_PROJECT: tests/AppWeb.Tests/AppWeb.Tests.csproj
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  build:
+    name: Build, test and package
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      INPUT_VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.Packages.props', '**/packages.lock.json') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Compute version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            if ($env:GITHUB_REF_NAME -notmatch '^v(?<v>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
+              throw "Tag inválida: $env:GITHUB_REF_NAME. Use vX.Y.Z ou vX.Y.Z-pre.N."
+            }
+            $version = $Matches['v']
+          }
+          elseif ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $version = ($env:INPUT_VERSION.Trim() -replace '^v', '')
+            if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+              throw "Versão inválida: $version"
+            }
+          }
+          else {
+            $version = "0.0.0-ci.$env:GITHUB_RUN_NUMBER"
+          }
+
+          $fileVersion = ($version -split '-')[0]
+          if (($fileVersion -split '\.').Count -eq 3) {
+            $fileVersion = "$fileVersion.0"
+          }
+
+          "APPWEB_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "APPWEB_FILE_VERSION=$fileVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Versão: $version | FileVersion: $fileVersion"
+
+      - name: Restore
+        run: dotnet restore $env:SOLUTION -r $env:RUNTIME_ID
+
+      - name: Build
+        run: >
+          dotnet build $env:SOLUTION
+          -c $env:CONFIGURATION
+          --no-restore
+          -p:Version=$env:APPWEB_VERSION
+          -p:FileVersion=$env:APPWEB_FILE_VERSION
+          -p:AssemblyVersion=$env:APPWEB_FILE_VERSION
+          -p:ContinuousIntegrationBuild=true
+
+      - name: Test
+        run: >
+          dotnet test $env:TEST_PROJECT
+          -c $env:CONFIGURATION
+          --no-build
+          --no-restore
+          --collect:"XPlat Code Coverage"
+          --results-directory TestResults
+          --logger "trx;LogFileName=test-results.trx"
+
+      - name: Publish
+        run: >
+          dotnet publish $env:PROJECT
+          -c $env:CONFIGURATION
+          -r $env:RUNTIME_ID
+          --self-contained true
+          --no-restore
+          -p:WindowsAppSDKSelfContained=true
+          -p:PublishSingleFile=false
+          -p:PublishTrimmed=false
+          -p:DebugType=None
+          -p:DebugSymbols=false
+          -p:Version=$env:APPWEB_VERSION
+          -p:FileVersion=$env:APPWEB_FILE_VERSION
+          -p:AssemblyVersion=$env:APPWEB_FILE_VERSION
+          -o "$env:RUNNER_TEMP\publish"
+
+      - name: Create portable ZIP
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "AppWeb-$env:APPWEB_VERSION-win-x64-portable.zip"
+          Compress-Archive -Path (Join-Path $env:RUNNER_TEMP 'publish\*') -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  $(Split-Path $zip -Leaf)" | Set-Content -LiteralPath "$zip.sha256" -Encoding ascii
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            throw 'ISCC.exe não encontrado.'
+          }
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'installer'
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+
+          & $env:ISCC `
+            "/DAppVersion=$env:APPWEB_VERSION" `
+            "/DSourceDir=$env:RUNNER_TEMP\publish" `
+            "/DOutputDir=$output" `
+            "installer\AppWeb.iss"
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          $setup = Get-ChildItem -LiteralPath $output -Filter '*.exe' | Select-Object -First 1
+          if (-not $setup) {
+            throw 'Instalador não gerado.'
+          }
+
+          $hash = (Get-FileHash -LiteralPath $setup.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($setup.Name)" | Set-Content -LiteralPath "$($setup.FullName).sha256" -Encoding ascii
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: appweb-win-x64
+          path: |
+            ${{ runner.temp }}/AppWeb-*-portable.zip
+            ${{ runner.temp }}/AppWeb-*-portable.zip.sha256
+            ${{ runner.temp }}/installer/*.exe
+            ${{ runner.temp }}/installer/*.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: windows-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      INPUT_VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: appweb-win-x64
+          path: artifacts
+
+      - name: Compute release tag
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $version = ($env:INPUT_VERSION.Trim() -replace '^v', '')
+            if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+              throw 'Versão inválida.'
+            }
+            $tag = "v$version"
+          }
+          else {
+            $tag = $env:GITHUB_REF_NAME
+            if ($tag -notmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+              throw 'Tag inválida.'
+            }
+          }
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Guard against duplicate tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Tag $env:RELEASE_TAG já existe."
+          }
+
+      # Ponto de inserção da assinatura de código:
+      # 1. Assinar AppWeb.Manager.exe e demais binários críticos.
+      # 2. Regenerar ZIP/instalador se necessário.
+      # 3. Assinar o instalador com timestamp RFC3161.
+      # 4. Só então gerar os arquivos .sha256.
+      # Nunca coloque secrets de assinatura no job build ou em PRs.
+
+      - name: Verify package files
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -LiteralPath artifacts -Recurse -File
+          if (-not ($files | Where-Object Extension -eq '.exe')) {
+            throw 'Instalador ausente.'
+          }
+          if (-not ($files | Where-Object Extension -eq '.zip')) {
+            throw 'Portable ZIP ausente.'
+          }
+          $files | ForEach-Object { Write-Host $_.FullName }
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: artifacts/**/*
+
+      - name: Publish draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: AppWeb ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
+          draft: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/**/*.exe
+            artifacts/**/*.zip
+            artifacts/**/*.sha256
